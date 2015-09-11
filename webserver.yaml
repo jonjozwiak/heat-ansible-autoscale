@@ -1,0 +1,92 @@
+heat_template_version: 2014-10-16
+description: A member of a load-balanced pool
+parameters:
+  image:
+    type: string
+    description: image used for servers
+  key_name:
+    type: string
+    description: ssh key to connect to the servers
+  ssh_user:
+    type: string
+  flavor:
+    type: string
+    description: flavor used by the server
+  pool_id:
+    type: string
+    description: LB pool
+  web_security_group: 
+    type: string
+    description: Web Server Security Group
+  metadata:
+    type: json
+  ansible_public_key:
+    type: string
+  network:
+    type: string
+    description: private network used by the server
+
+resources:
+  random_hostname_suffix:
+    type: OS::Heat::RandomString
+    properties:
+      character_classes: [{"class": lowercase}, {"class": digits}]
+      length: 8
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      name:
+        str_replace:
+          template: "webserver-SUFFIX"
+          params:
+            SUFFIX: {get_attr: [random_hostname_suffix, value]}
+      admin_user: {get_param: ssh_user}
+      flavor: {get_param: flavor}
+      image: {get_param: image}
+      key_name: {get_param: key_name}
+      metadata: {get_param: metadata}
+      security_groups: 
+      - {get_param: web_security_group}
+      user_data_format: SOFTWARE_CONFIG
+      user_data: {get_resource: init}
+      networks: [{network: {get_param: network} }]
+
+  init: 
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+      - config: {get_resource: set_hostname}
+      - config: {get_resource: ssh_keys}
+
+  set_hostname:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        hostname:
+          str_replace:
+            template: "webserver-SUFFIX"
+            params:
+              SUFFIX: {get_attr: [random_hostname_suffix, value]}
+        manage-resolv-conf: true
+        resolv_conf:
+          nameservers: ['8.8.4.4', '8.8.8.8']
+
+  ssh_keys:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        ssh_authorized_keys:
+        - {get_param: ansible_public_key}
+
+  member:
+    type: OS::Neutron::PoolMember
+    properties:
+      pool_id: {get_param: pool_id}
+      address: {get_attr: [server, first_address]}
+      protocol_port: 80
+
+outputs:
+  ip_address:
+    description: IP address of the node
+    value: {get_attr: [server, first_address]}

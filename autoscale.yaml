@@ -1,0 +1,179 @@
+heat_template_version: 2014-10-16
+description: Ansible with Auto-Scaling Example
+parameters:
+  image:
+    type: string
+    description: image used for servers
+    default: CentOS-7-20150628-x86_64
+  key:
+    type: string
+    description: ssh key to connect to the servers
+    default: adminkey
+  flavor:
+    type: string
+    description: flavor used by the web servers
+    default: m1.small
+  network:
+    type: string
+    description: Existing private network used by the server
+    default: c5189428-109a-4192-a32b-9fee4cac3e8a
+  subnet_id:
+    type: string
+    description: subnet on which the load balancer will be located
+    default: 7dad83b5-1605-40a7-ad95-68a147f60964
+  external_network_id:
+    type: string
+    description: ID of the external/floating IP network (neutron net-list)
+    default: f6e90c05-a8d7-41c4-b0c9-5bf5edcb1ad0
+  node_count:
+    type: number
+    description: >
+      Desired number of nodes to deploy
+    default: 2
+  ssh_user:
+    type: string
+    description: >
+      The SSH user available on all nodes.
+    default: 'cloud-user'
+
+
+resources:
+  ansible_host:
+    depends_on: webserverasg
+    type: ansible_host.yaml
+    properties:
+      image: {get_param: image}
+      key_name: {get_param: key}
+      ssh_user: {get_param: ssh_user}
+      flavor: {get_param: flavor}
+      network: {get_param: network}
+      ansible_public_key: {get_attr: [ansible_keys, public_key]}
+      ansible_private_key: {get_attr: [ansible_keys, private_key]}
+      ansible_hosts:
+        list_join:
+        - "\n"
+        - {get_attr: [webserverasg, outputs_list, ip_address]}
+
+  web_sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description: Ping, SSH, and HTTP(s)
+      rules:
+      - protocol: icmp
+      - protocol: tcp
+        port_range_min: 22
+        port_range_max: 22
+      - protocol: tcp
+        port_range_min: 80
+        port_range_max: 80
+      - protocol: tcp
+        port_range_min: 443
+        port_range_max: 443
+  webserverasg:
+    type: OS::Heat::AutoScalingGroup
+    properties:
+      desired_capacity: {get_param: node_count}
+      min_size: 2
+      max_size: 5
+      resource:
+        type: webserver.yaml
+        properties:
+          flavor: {get_param: flavor}
+          image: {get_param: image}
+          key_name: {get_param: key}
+          ssh_user: {get_param: ssh_user}
+          network: {get_param: network}
+          pool_id: {get_resource: pool}
+          web_security_group: {get_resource: web_sg}
+          ansible_public_key: {get_attr: [ansible_keys, public_key]}
+          metadata: {"metering.stack": {get_param: "OS::stack_id"}}
+
+#  web_server_scaleup_policy:
+#    type: OS::Heat::ScalingPolicy
+#    properties:
+#      adjustment_type: change_in_capacity
+#      auto_scaling_group_id: {get_resource: webserverasg}
+#      cooldown: 60
+#      scaling_adjustment: 1
+#  web_server_scaledown_policy:
+#    type: OS::Heat::ScalingPolicy
+#    properties:
+#      adjustment_type: change_in_capacity
+#      auto_scaling_group_id: {get_resource: webserverasg}
+#      cooldown: 60
+#      scaling_adjustment: -1
+#  cpu_alarm_high:
+#    type: OS::Ceilometer::Alarm
+#    properties:
+#      description: scale-up if the average cpu > 50% for 1 minute
+#      meter_name: cpu_util
+#      statistic: avg
+#      period: 60
+#      evaluation_periods: 1
+#      threshold: 50
+#      alarm_actions:
+#        - {get_attr: [web_server_scaleup_policy, alarm_url]}
+#      matching_metadata: {'metadata.user_metadata.stack': {get_param: "OS::stack_id"}}
+#      comparison_operator: gt
+#  cpu_alarm_low:
+#    type: OS::Ceilometer::Alarm
+#    properties:
+#      description: Scale-down if the average CPU < 15% for 10 minutes
+#      meter_name: cpu_util
+#      statistic: avg
+#      period: 600
+#      evaluation_periods: 1
+#      threshold: 15
+#      alarm_actions:
+#        - {get_attr: [web_server_scaledown_policy, alarm_url]}
+#      matching_metadata: {'metadata.user_metadata.stack': {get_param: "OS::stack_id"}}
+#      comparison_operator: lt
+  monitor:
+    type: OS::Neutron::HealthMonitor
+    properties:
+      type: TCP
+      delay: 5
+      max_retries: 5
+      timeout: 5
+  pool:
+    type: OS::Neutron::Pool
+    properties:
+      protocol: HTTP
+      monitors: [{get_resource: monitor}]
+      subnet_id: {get_param: subnet_id}
+      lb_method: ROUND_ROBIN
+      vip:
+        protocol_port: 80
+  lb:
+    type: OS::Neutron::LoadBalancer
+    properties:
+      protocol_port: 80
+      pool_id: {get_resource: pool}
+
+  # assign a floating ip address to the load balancer
+  # pool.
+  lb_floating:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: {get_param: external_network_id}
+      port_id: {get_attr: [pool, vip, port_id]}
+  ansible_keys:
+    type: OS::Nova::KeyPair
+    properties:
+      name: ansible_keys
+      save_private_key: True
+
+outputs:
+  web_url:
+    value:
+      str_replace:
+        template: http://host/
+        params:
+          host: { get_attr: [lb_floating, floating_ip_address] }
+    description: >
+      The external url to access the web pool
+  web_hosts:
+    value: {get_attr: [webserverasg, outputs_list, ip_address]}
+    description: >
+      This is a list of all of the "private" addresses to the web servers
+
